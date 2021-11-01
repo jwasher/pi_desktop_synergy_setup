@@ -1,0 +1,136 @@
+---
+- name: add users_to_add
+  tags: main
+  hosts: all
+  remote_user: pi
+  become: yes
+  vars:
+    default_console_user: washer
+    ssh_key_location: /Users/washer
+    users_to_add:
+      - washer
+      - ansible
+
+  tasks:
+    - name: Create our users
+      user:
+        name: "{{item}}"
+      loop: "{{users_to_add}}"
+
+    - name: sudoers for users_to_add
+      lineinfile:
+        line: "{{item}} ALL=(ALL)       NOPASSWD:ALL"
+        path: /etc/sudoers.d/{{item}}
+        state: present
+        create: yes
+      loop: "{{users_to_add}}"
+
+    - name: my ssh for for newly added users
+      ansible.posix.authorized_key:
+        user: "{{item}}"
+        key: "{{ lookup('file', '{{ssh_key_location}}/.ssh/id_rsa.pub') }}"
+      loop: "{{users_to_add}}"
+
+    - name: lock pi user account
+      user:
+        password: "!"
+        name: pi
+
+    - name: set the default console user
+      lineinfile:
+        path: /etc/lightdm/lightdm.conf
+        regexp: '^autologin-user=pi'
+        line: 'autologin-user={{default_console_user}}'
+
+    - name: set bash to use vi editing for new users
+      lineinfile:
+        path: "~{{item}}/.profile"
+        insertafter: EOF
+        line: 'set -o vi'
+      loop: "{{users_to_add + [ 'pi' ] }}"
+
+    - name: set bash to use vi editing for root
+      lineinfile:
+        path: "~{{item}}/.profile"
+        insertbefore: '^mesg n || true'
+        line: 'set -o vi'
+      loop:
+        - root
+
+    - name: Update apt cache
+      apt:
+        update_cache: yes
+        force_apt_get: yes
+        cache_valid_time: 3600
+
+    - name: Add some packages I want
+      apt:
+        pkg:
+          - vim
+
+    - name: Update packages
+      apt:
+        upgrade: dist
+        force_apt_get: yes
+
+    - name: Check if a reboot is needed for Debian and Ubuntu boxes
+      register: reboot_required_file
+      stat: path=/var/run/reboot-required get_md5=no
+
+    - name: Do some config stuff
+      shell: "sudo raspi-config nonint do_change_timezone America/Los_Angeles"
+
+    - name: Reboot the Debian or Ubuntu server
+      reboot:
+        msg: "Reboot initiated by Ansible due to kernel updates"
+        connect_timeout: 5
+        reboot_timeout: 300
+        pre_reboot_delay: 0
+        post_reboot_delay: 30
+        test_command: uptime
+      when: reboot_required_file.stat.exists
+
+
+#
+#- name: Install synergy and make it run on book
+#Handler to reboot if we've made a reboot-required change
+- name: Setup synergy
+  tags: synergy
+  hosts: all
+  vars:
+    default_console_user: washer
+    synergy_host: imac.nv.trlp.com
+  tasks:
+    - name: Synergy - copy file
+      copy:
+        src: synergy_1.14.0-stable.67d824b8_raspios_armhf.deb
+        dest: /tmp/synergy.deb
+        mode: 0644
+
+    - name: Synergy - install
+      become: yes
+      apt:
+        deb: /tmp/synergy.deb
+
+    - name: make an autostart dir
+      file:
+        path: /home/{{default_console_user}}/.config/lxsessions/LXDE
+        state: directory
+        mode: 0755
+    - name: Create an autostart file
+      blockinfile:
+        path: /home/{{default_console_user}}/.startsynergyc
+        create: yes
+        block: |
+          killall synergyc
+          sleep 1
+          /usr/bin/synergyc {{synergy_host}}
+          exit 0
+
+    - name: Synergy - add autostart file
+      lineinfile:
+        line: "/usr/bin/bash ~/.startsynergyc.sh"
+        path: /home/{{default_console_user}}/.config/lxsessions/LXDE/autostart
+        state: present
+        create: yes
+          
